@@ -99,12 +99,9 @@ def create_multitask_predictor(device):
     torch.nn.init.xavier_uniform_(predictor.weight)
     return predictor
 
-def load_model_eval(configs, now, device, plot=False):
+def load_model_eval(configs, now, device):
     if configs.save_model:
-        if plot:
-            model = None
-        else:
-            model = okt_model_init(configs, device, now, False, load_in_8bit=True)
+        model = okt_model_init(configs, device, now, False, load_in_8bit=True)
         tokenizer = create_tokenizer(configs)
 
         lstm_hid_dim = 18 if configs.baseline else 11

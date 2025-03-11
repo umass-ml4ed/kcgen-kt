@@ -1,5 +1,5 @@
 # Automated Knowledge Component Generation and Knowledge Tracing for Coding Problems
-This repository contains the code for the paper <a href="https://arxiv.org/abs/2410.10829">Automated Knowledge Component Generation and Knowledge Tracing for Coding Problems</a>. The primary contributions here include 1. A completely automatic KC generation pipeline using solution AST. 2. Utilizing KC mastery level for knowledge tracing task 
+This repository contains the code for the paper <a href="https://arxiv.org/abs/2502.18632">Automated Knowledge Component Generation and Knowledge Tracing for Coding Problems</a>. The primary contributions here include 1. A completely automatic KC generation pipeline using solution AST. 2. Utilizing KC mastery level for knowledge tracing task 
 
 ## Setup
 

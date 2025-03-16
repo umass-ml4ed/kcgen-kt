@@ -11,9 +11,4 @@ cd data
 bash data.sh
 ```
 
-### Environment
-We used Python 3.8.18 in the development of this work. Run the following to set up a Conda environment:
-```
-conda create --name <env> --file requirements.txt
-```
 

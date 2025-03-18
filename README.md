@@ -11,4 +11,13 @@ cd data
 bash data.sh
 ```
 
+### Environment
+We use Python 3.8 in the development of this work. Run the following to set up a Conda environment and install the packages required. After activate the conda environment, we install pytorch with cuda version 11.8, you may want to install according to your own situation. More info can be found on the PyTorch website: https://pytorch.org/get-started/locally/ :
+```
+conda create --name <env_name> python=3.8
+conda activate <env_name>
+pip3 install torch --index-url https://download.pytorch.org/whl/cu118 
+conda env update --name <env_name> --file environment.yml
+```
+
 

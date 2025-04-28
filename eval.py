@@ -69,18 +69,6 @@ def evaluate(configs, now, test_loader, tokenizer, device):
         pred_scores = [pred_score_i for pred_subset in pred_score_total for pred_score_i in pred_subset]
         pred_labels = [1 if value > 0.5 else 0 for value in pred_scores]
         gt_scores = [gt_score_i for gt_subset in gt_score_total for gt_score_i in gt_subset]
-        
-        check_gt = []
-        check_pred = []
-        for ind in range(len(prompts)):
-            if prompts[ind] == 'Say that a "clump" in an array is a series of 2 or more adjacent elements of the same value. Return the number of clumps in the given array.':
-                if gt_scores[ind] > 0.5:
-                    check_gt.append(gt_scores[ind])
-                    check_pred.append(pred_scores[ind])
-                    print(pred_scores[ind])
-                    print(gt_scores[ind])
-                    print('')
-
     
         pred_res = sum([pred == label for pred, label in zip(pred_labels, gt_scores)])
         acc = pred_res / len(gt_scores)

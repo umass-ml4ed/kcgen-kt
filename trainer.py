@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from pdb import set_trace
 import numpy as np
 from torch.utils.checkpoint import checkpoint
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimizers_lstm=None,
                    configs=None, train_dl_len=None, train=True, scheduler=None, device=None, 
@@ -53,12 +55,8 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
     padded_mask = mask_tensor.reshape((T * B), -1)
     mask_groups = torch.split(padded_mask, group_size)
 
-    pred_cum_loss = 0.0
-    pred_cnt = 0
-    cum_loss = 0.0
-    cum_cnt = 0
-    kc_cum_loss = 0.0
-    kc_cnt = 0
+    pred_cum_loss, cum_loss, kc_cum_loss = 0.0, 0.0, 0.0
+    pred_cnt, cum_cnt, kc_cnt = 0, 0, 0
 
     pred_total = torch.tensor([]).to(device)
     gt_total = torch.tensor([]).to(device)
@@ -112,21 +110,41 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
         # KC error rate loss
         score_sub = score_groups[i]
         kc_prod_sub = kc_prod_groups[i]
+
+
         kc_loss_sub = kc_loss_fn(kc_prod_sub[score_sub != -100], score_sub[score_sub != -100]).sum()
 
         kc_cum_loss += kc_loss_sub
         kc_cnt += score_sub[score_sub != -100].shape[-1]
 
         if multitask:
-            # score_sub = score_groups[i]
-            gt_total = torch.cat((gt_total, score_sub), 0)
-            pred = (torch.sigmoid(logits) > 0.5) * 1
-            pred_total = torch.cat((pred_total, pred), 0)
-            logits_total = torch.cat((logits_total, logits), 0)
+            if configs.binary_loss_fn == 'BCE':
+                gt_total = torch.cat((gt_total, score_sub), 0)
+                pred = (torch.sigmoid(logits) > 0.45) * 1
+                pred_total = torch.cat((pred_total, pred), 0)
+                logits_total = torch.cat((logits_total, logits), 0)
 
-            pred_loss_sub = pred_loss_fn(logits[score_sub != -100], score_sub[score_sub != -100]).sum()
-            pred_cum_loss += pred_loss_sub
-            pred_cnt += logits[score_sub != -100].shape[-1]
+                pred_loss_sub = pred_loss_fn(logits[score_sub != -100], score_sub[score_sub != -100]).sum()
+                pred_cum_loss += pred_loss_sub
+                pred_cnt += logits[score_sub != -100].shape[-1]
+            
+            else:
+                score_sub = score_sub.view(-1)
+                score_mask = score_sub != -100
+                valid_logits = logits[score_mask]
+                valid_logits = valid_logits / configs.temperature
+                valid_scores = score_sub[score_mask].long()
+
+                pred = torch.argmax(logits, dim=-1)
+
+                gt_total = torch.cat((gt_total, score_sub), 0)
+                pred_total = torch.cat((pred_total, pred), 0)
+                logits_total = torch.cat((logits_total, logits), 0)
+
+                pred_loss_sub = pred_loss_fn(valid_logits, valid_scores).sum()
+                pred_cum_loss += pred_loss_sub
+                pred_cnt += valid_scores.shape[0]
+
 
     kc_cum_loss = kc_cum_loss / kc_cnt
 
@@ -135,13 +153,15 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
     
     cum_loss = cum_loss / cum_cnt
     
-    ## Prediction loss + kc loss
+
+    # Code Prediction loss + kc loss + correctness loss
     total_loss = cum_loss + kc_cum_loss + pred_cum_loss
 
     if multitask: 
         if configs.kc_loss:
             back_loss = cum_loss + kc_cum_loss + pred_cum_loss
-            norm_loss = configs.alpha * (cum_loss / cum_loss.detach() + pred_cum_loss / pred_cum_loss.detach()) + (1 - configs.alpha) * kc_cum_loss / kc_cum_loss.detach() 
+
+            norm_loss = configs.alpha * (cum_loss / (cum_loss.detach() + eps) + pred_cum_loss / (pred_cum_loss.detach() + eps)) + (1 - configs.alpha) * kc_cum_loss / (kc_cum_loss.detach() + eps)
             # norm_loss = cum_loss / cum_loss.detach() + pred_cum_loss / pred_cum_loss.detach() + kc_cum_loss / kc_cum_loss.detach() 
 
         else:
@@ -154,6 +174,7 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
         # back_loss /= configs.accum_iter
         if configs.kc_loss:
             norm_loss.backward()
+
         else:
             back_loss.backward()
 
@@ -185,11 +206,11 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
                     optimizer.zero_grad()
 
 
-    ## random baseline:
+    # # random baseline:
     # logits_total = torch.randn(pred_total.shape).to(device)
     # pred_total = (torch.sigmoid(logits_total) > 0.5) * 1
 
-    ## majority baseline:
+    # # # majority baseline:
     # logits_total = torch.ones(pred_total.shape).to(device)
     # pred_total = torch.ones(pred_total.shape).to(device)
 
@@ -199,15 +220,28 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
         log['predictor_loss'] = pred_cum_loss.cpu().detach()
         pred_res = pred_total[gt_total != -100].detach().cpu() == gt_total[gt_total != -100].detach().cpu()
         log['acc'] = pred_res
-        log['auc'] = {'logits': logits_total[gt_total != -100].detach().cpu(), 'scores': gt_total[gt_total != -100].detach().cpu()}
-    
+        if configs.binary_loss_fn == 'BCE':
+            log['auc'] = {'logits': logits_total[gt_total != -100].detach().cpu(), 'scores': gt_total[gt_total != -100].detach().cpu()}
+        else:
+            logits_filtered = logits_total[gt_total != -100]
+            scores_filtered = gt_total[gt_total != -100]
+
+            probs = torch.softmax(logits_filtered, dim=-1)[:, 1]
+
+            log['auc'] = {
+                'logits': probs.detach().cpu(),   # scores between 0 and 1
+                'scores': scores_filtered.detach().cpu().long()
+            }
+
     return log
 
 
 def predict_mastery_level(padded_inputs, padded_kc, lstm, trans=False, trans_linear=None):
     ks, hidden = lstm(padded_inputs)
+
     if trans:
         ks = trans_linear(ks)
+    
     ks = torch.sigmoid(ks)
 
     padding_mask = padded_kc == -1
@@ -223,16 +257,20 @@ def predict_mastery_level(padded_inputs, padded_kc, lstm, trans=False, trans_lin
 
 
 
-def update_input_weight(padded_input_ids_ls, padded_inputs, padded_kc, level_loc_ls, device, model, lstm, tokenizer, trans=False, trans_linear=None, kc_loss_method='prod'):
-    # Convert padded_input_ids to input_weight
-    generator_input_wte = model.base_model.model.model.embed_tokens(padded_input_ids_ls)  # shape: (B, T, max_len, 4096), T is not aligned yet
-
+def update_input_weight(padded_input_ids_ls, padded_inputs, padded_kc, level_loc_ls, device, model, lstm, tokenizer, trans=False, trans_linear=None, kc_loss_method='mean'):
     # Get embedding for True & False for replacing the embedding of ? to actual mastery level
     true_token = tokenizer.convert_tokens_to_ids('True')
     false_token = tokenizer.convert_tokens_to_ids('False')
-
-    true_emb = model.base_model.model.model.embed_tokens(torch.tensor(true_token))
-    false_emb = model.base_model.model.model.embed_tokens(torch.tensor(false_token))
+    
+    # Convert padded_input_ids to input_weight
+    if isinstance(model, DDP):
+        generator_input_wte = model.module.base_model.model.model.embed_tokens(padded_input_ids_ls)
+        true_emb = model.module.base_model.model.model.embed_tokens(torch.tensor(true_token))
+        false_emb = model.module.base_model.model.model.embed_tokens(torch.tensor(false_token))
+    else:    
+        generator_input_wte = model.base_model.model.model.embed_tokens(padded_input_ids_ls)  # shape: (B, T, max_len, 4096), T is not aligned yet
+        true_emb = model.base_model.model.model.embed_tokens(torch.tensor(true_token))
+        false_emb = model.base_model.model.model.embed_tokens(torch.tensor(false_token))
 
     result_kc, kc = predict_mastery_level(padded_inputs, padded_kc, lstm, trans, trans_linear)
 

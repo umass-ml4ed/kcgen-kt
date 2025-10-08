@@ -1,3 +1,6 @@
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 from omegaconf import OmegaConf
 from datetime import datetime
 import hydra
@@ -12,6 +15,7 @@ from eval import *
 
 @hydra.main(version_base=None, config_path=".", config_name="configs_kc")
 def main(configs):
+    torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(now)
@@ -19,11 +23,13 @@ def main(configs):
     # Make reproducible
     set_random_seed(configs.seed)
 
+    # Single GPU setup
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     if configs.use_cuda: 
         if torch.cuda.is_available():
             device = torch.device('cuda')
         assert device.type == 'cuda', 'No GPU found'
+
 
     # # Use wandb to track experiment
     if configs.log_wandb:
@@ -32,34 +38,42 @@ def main(configs):
         print('Run id:', wandb.run.id)
         wandb.config.update(OmegaConf.to_container(configs, resolve=True))
 
+
     if configs.baseline:
         kc_problem_dict, kc_no_dict = extract_baseline_kc('data/prompt_concept.csv')
+
     else:
-        kc_problem_dict, kc_no_dict = get_problem_kc()
-       
+        kc_problem_dict, kc_no_dict = get_problem_kc(configs.kc_path)  
+
+
+    ## load the init dataset
+    train_stu, valid_stu, test_stu, df, students = read_data('data/dataset_time.pkl', kc_problem_dict, configs)
+   
+
     ## load model 
     if not configs.transition:
         lstm, model, tokenizer = create_model(configs, device, len(kc_no_dict))
         trans_linear = None
     else:
-        lstm, model, tokenizer = create_model(configs, device, 64)
-        trans_linear = create_knowledge_linear(device, len(kc_no_dict))
+        lstm, model, tokenizer = create_model(configs, device, configs.transition_dim)
+        trans_linear = create_knowledge_linear(device, len(kc_no_dict), configs.transition_dim)
 
 
     predictor = None
     if configs.multitask:
-        predictor = create_multitask_predictor(device)
+        if configs.binary_loss_fn == 'BCE':
+            predictor = create_multitask_predictor(device, configs.predictor_multilayer)
+
+        else:
+            predictor = create_binary_predictor(device)
     
-    ## load the init dataset
-    train_stu, valid_stu, test_stu, df, students = read_data('data/dataset_time.pkl', kc_problem_dict, configs)
-
     collate_fn = CollateForKC(tokenizer, configs, device, kc_no_dict)
-
     
     if configs.testing:
         train_stu = train_stu[:3]
         valid_stu = valid_stu[:3]
         test_stu = test_stu[:3]
+        configs.epochs = 1
 
 
     train_loader = make_dataloader(train_stu, df, collate_fn, configs)
@@ -96,6 +110,9 @@ def main(configs):
 
         if configs.binary_loss_fn == 'BCE':
             binary_loss_fn = nn.BCEWithLogitsLoss(reduction='none')
+        
+        else:
+            binary_loss_fn = nn.CrossEntropyLoss(reduction='none')
 
 
     # LR scheduler
@@ -112,8 +129,7 @@ def main(configs):
 
     best_test_acc = -float('inf')
 
-
-    for ep in tqdm(range(configs.epochs), desc="epochs"):
+    for ep in tqdm(range(configs.epochs), desc="epochs", mininterval=20.0):
         train_logs, test_logs, valid_logs = [], [], []
 
         # training
@@ -125,11 +141,11 @@ def main(configs):
             
             train_logs.append(train_log)
 
-
+            
             ## save results to wandb
             if configs.log_train_every_itr and configs.log_wandb:
                 if (idx+1) % configs.log_train_every_itr == 0:
-                    itr_train_logs = aggregate_metrics(train_logs)
+                    itr_train_logs = aggregate_metrics(train_logs, configs)
                     for key in itr_train_logs:
                         wandb.log({"metrics/train_every_{}_itr/{}".format(configs.log_train_every_itr,key): itr_train_logs[key]})
 
@@ -151,11 +167,11 @@ def main(configs):
 
             test_logs.append(test_log)
         
-        # logging
-        train_logs = aggregate_metrics(train_logs)
-        valid_logs = aggregate_metrics(valid_logs)
-        test_logs  = aggregate_metrics(test_logs )
 
+        # logging
+        train_logs = aggregate_metrics(train_logs, configs)
+        valid_logs = aggregate_metrics(valid_logs, configs)
+        test_logs  = aggregate_metrics(test_logs, configs )
 
         ## log the results and save models
         for key in valid_logs:
@@ -228,7 +244,7 @@ def main(configs):
     test_loader = make_dataloader(test_stu, df, collate_fn_eval, configs)
 
     print('start eval func:')
-    res = evaluate(configs, now, test_loader, tokenizer, device)
+    res = evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict)
 
     
     result = {'codeBLEU': res['codebleu']}

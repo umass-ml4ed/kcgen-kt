@@ -1,14 +1,10 @@
 import pandas as pd
 import ast
-import code_ast
 import json
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.metrics import log_loss, r2_score
-from scipy.stats import ttest_ind
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from pdb import set_trace
@@ -17,7 +13,6 @@ from trainer import *
 import random
 import math
 import statistics
-from sklearn.preprocessing import OneHotEncoder
 
 # get unique problem statement
 def get_unique_problems(df):
@@ -34,25 +29,26 @@ def get_method_dec(df):
 
     return method_dict
 
-# Value of kc_dict has a format: [(initial_generated_kc, cluster_name, final_kc)]
-# return a dictionary {problem: [final_kc1, final_kc2...]}
-def get_problem_kc(kc_file="problem_kc.json"):
-    res = {}
-    kc_set= set()
-    with open(kc_file, 'r') as f:
-        kc_dict = json.load(f)
-        for key, val in kc_dict.items():
-            uniq_kc = set([i[-1] for i in val])
-            res[key] = list(uniq_kc)
 
-            for j in val:
-                kc_set.add(j[-1])
+def get_problem_kc(kc_file):
+    kc_cnt = 0
 
-    kc_set = list(kc_set)
-    kc_dict_res = {kc_set[i]: i for i in range(len(kc_set))}
+    uniq_kcs = set()
+    with open(kc_file, 'rb') as f:
+        kc_problem_dict = json.load(f)
 
-    
-    return res, kc_dict_res
+        for key, val in kc_problem_dict.items():
+            kc_cnt += len(val)
+            for kc in val:
+                uniq_kcs.add(kc)
+
+    uniq_kcs = list(uniq_kcs)
+    print('No. of KCs:', len(uniq_kcs))
+    print('Avg Kcs per problem:', kc_cnt / len(kc_problem_dict))
+ 
+    kc_dict_res = {uniq_kcs[i]: i for i in range(len(uniq_kcs))}
+
+    return kc_problem_dict, kc_dict_res
 
 
 # get baseline kc
@@ -67,6 +63,15 @@ def extract_baseline_kc(file):
 
     return res, kc_dict_res
     
+def extract_falcon_baseline_kc(file):
+    df = pd.read_csv(file)
+    kcs = list(df.columns)[7:]
+
+    res = {row['id']:df.columns[7:][row[7:] == 1].tolist() for _, row in df.iterrows()}
+    
+    kc_dict_res = {kcs[i]: i for i in range(len(kcs))}
+    return res, kc_dict_res
+
 
 def read_data(file, kc_problem_dict, configs):
     df = pd.read_pickle(file)
@@ -81,16 +86,19 @@ def read_data(file, kc_problem_dict, configs):
 
     df.drop(columns=['Score_x', 'Score_y'], inplace=True)
 
+    df.sort_values(by=['SubjectID', 'ServerTimestamp'], inplace=True)
+
     # Map problem KCs to each data
     df['knowledge_component'] = df['prompt'].map(kc_problem_dict)
 
-    # if configs.first_ast_convertible:
-    df = df.drop_duplicates(subset=['SubjectID', 'ProblemID'],keep='first').reset_index(drop=True)
+
+    if configs.first_ast_convertible:
+        df = df.drop_duplicates(subset=['SubjectID', 'ProblemID'],keep='first').reset_index(drop=True)
+
 
     prev_subject_id = 0
     subjectid_appendix = []
     timesteps = []
-    
     for i in tqdm(range(len(df)), desc="splitting students' records ..."):
         if prev_subject_id != df.iloc[i].SubjectID:
             # when encountering a new student ID
@@ -99,7 +107,7 @@ def read_data(file, kc_problem_dict, configs):
             id_appendix = 1
         else:
             accumulated += 1
-            if accumulated >= max_len:
+            if accumulated >= configs.max_len:
                 id_appendix += 1
                 accumulated = 0
         timesteps.append(accumulated)
@@ -109,9 +117,11 @@ def read_data(file, kc_problem_dict, configs):
     df['SubjectID'] = [df.iloc[i].SubjectID + '_{}'.format(df.iloc[i].SubjectID_appendix) for i in range(len(df))]
 
     students = df['SubjectID'].unique()
-
     train_stu, test_stu = train_test_split(students, test_size=configs.test_size, random_state=configs.seed)
     valid_stu, test_stu = train_test_split(test_stu, test_size=0.5, random_state=configs.seed)
+
+    subset = df[df['SubjectID'].isin(test_stu)]
+
     return train_stu, valid_stu, test_stu, df, students
 
 
@@ -120,24 +130,27 @@ def make_pytorch_dataset(students, dataset):
 
     for student in students:
         subset = dataset[dataset['SubjectID'] == student]
-        subset.loc[:, 'prompt-embedding'] = subset['prompt-embedding'].apply(lambda x: torch.tensor(x))
-        data_dict = {
-            'SubjectID': student,
-            'ProblemID_seq': subset.ProblemID.tolist(),
-            'Score': subset.Score.tolist(),
-            'prompt-embedding': subset['prompt-embedding'].tolist(),
-            'input': subset.input.tolist(),
-            'KC': subset['knowledge_component'].tolist(),
-            'next_prompt': subset.prompt.tolist(),
-            'next_code': subset.Code.tolist(),
-        }
-        lstm_student.append(data_dict)
+        # Only student with more than one submission is valid since one submission is used for knowledge estimation for next problem
+        if len(subset) > 1:
+            subset.loc[:, 'prompt-embedding'] = subset['prompt-embedding'].apply(lambda x: torch.tensor(x))
+            data_dict = {
+                'SubjectID': student,
+                'ProblemID_seq': subset.ProblemID.tolist(),
+                'Score': subset.Score.tolist(),
+                'prompt-embedding': subset['prompt-embedding'].tolist(),
+                'input': subset.input.tolist(),
+                'KC': subset['knowledge_component'].tolist(),
+                'next_prompt': subset.prompt.tolist(),
+                'next_code': subset.Code.tolist(),
+            }
+
+            lstm_student.append(data_dict)
 
     return lstm_student
 
-def make_dataloader(students, dataset, collate_fn, configs, shuffle=False):
+def make_dataloader(students, dataset, collate_fn, configs, sampler=None, shuffle=False):
     lstm_student = make_pytorch_dataset(students, dataset)
-    data_loader = torch.utils.data.DataLoader(lstm_student, collate_fn=collate_fn, shuffle=shuffle, batch_size=configs.batch_size)
+    data_loader = torch.utils.data.DataLoader(lstm_student, collate_fn=collate_fn, shuffle=shuffle, sampler=sampler, batch_size=configs.batch_size)
     return data_loader
 
 
@@ -148,7 +161,7 @@ def build_prompt_with_special_tokens(prompt, kcs):
     if "?" in prompt:
         prompt = prompt.replace("?", ".")
 
-    assert "student written code" not in prompt
+    assert "written" not in prompt
 
     prompt = "Question: " + prompt
     for i in range(len(kcs)):
@@ -156,6 +169,7 @@ def build_prompt_with_special_tokens(prompt, kcs):
         kc_intro = f" KC {i+1}: {kc}."
         kc_level = f" The student's mastery level on {kc} is ?"
         prompt += kc_intro + kc_level
+
 
     prompt += " Student written code:"
 
@@ -171,7 +185,6 @@ class CollateForKC(object):
     def __init__(self, tokenizer, configs, device, kc_dict, eval=False):
         self.tokenizer = tokenizer
         self.tokenizer.padding_side = "left" if eval else "right"
-
         self.configs = configs
         self.device = device
         self.delimiter_token_id = tokenizer.convert_tokens_to_ids("Ġwritten")
@@ -187,12 +200,12 @@ class CollateForKC(object):
         padded_scores = torch.Tensor(padded_scores).t().to(self.device)  # shape: (T, B)
 
         question_seqs = [b['ProblemID_seq'] for b in batch]
-        # question_seqs = [[self.question_no_map[i] for i in seqs] for seqs in question_seqs]
         padded_question_seqs = [i + [-100]*(max_len - len(i)) for i in question_seqs]
         padded_question_seqs = torch.tensor(padded_question_seqs) # shape: (B, T)
 
         inputs = [b['input'] for b in batch]
-        padded_inputs = [i + [torch.zeros(i[0].shape[0])] * (max_len - len(i)) for i in inputs]
+        padded_inputs = [i + [torch.zeros(self.configs.lstm_inp_dim)] * (max_len - len(i)) for i in inputs]
+        # padded_inputs = [i + [torch.zeros(i[0].shape[0])] * (max_len - len(i)) for i in inputs]
         padded_inputs = torch.stack([torch.stack(x, dim=0) for x in padded_inputs], dim=1).float().to(self.device)  # shape: (T, B, D)
 
         kcs_name = [b['KC'] for b in batch]
@@ -230,6 +243,7 @@ class CollateForKC(object):
         padded_codes = [i + [''] * (max_len - len(i)) for i in codes]
         stacked_codes = list(map(list, zip(*padded_codes)))
 
+
         prompts = [b['next_prompt'] for b in batch]
         padded_prompts = [i + [''] * (max_len - len(i)) for i in prompts]
         stacked_prompts = list(map(list, zip(*padded_prompts)))
@@ -241,11 +255,16 @@ class CollateForKC(object):
             input_texts = [[build_input_with_special_tokens(prompt_i, kc_i, code_i, self.tokenizer) for
                             prompt_i, kc_i, code_i in zip(entry['next_prompt'], entry['KC'], entry['next_code'])] for entry in batch]
 
+
         inputs_ids_ls, attention_mask_ls, labels_ls, prompt_id_lens_ls, level_loc_ls = [], [], [], [], []
+
+        len_ls = []
 
         for input_sub in input_texts:
             inputs = self.tokenizer(input_sub, return_tensors='pt', padding=True, truncation=True)
             inputs_ids, attention_mask = inputs['input_ids'].to(self.device), inputs['attention_mask'].to(self.device)
+
+            len_ls.append(inputs_ids.shape[-1])
 
             if not self.eval:
                 inputs_ids[:, -1] = self.tokenizer.eos_token_id
@@ -303,7 +322,6 @@ class CollateForKC(object):
         padded_prompt_id_lens_ls = torch.stack(padded_prompt_id_lens_ls).t()  # shape: (T, B)
 
         if self.eval:
-            return padded_inputs, padded_input_ids_ls, padded_attention_mask_ls, stacked_codes, stacked_prompts, padded_scores, stacked_students, padded_kc, level_loc_ls, padded_question_seqs
+            return padded_inputs, padded_input_ids_ls, padded_attention_mask_ls, stacked_codes, stacked_prompts, padded_scores, stacked_students, padded_kc, level_loc_ls, padded_question_seqs, len_ls
 
-        return padded_scores, padded_inputs, padded_input_ids_ls, padded_attention_mask_ls, padded_labels_ls, padded_prompt_id_lens_ls, padded_kc, level_loc_ls
-
+        return padded_scores, padded_inputs, padded_input_ids_ls, padded_attention_mask_ls, padded_labels_ls, padded_prompt_id_lens_ls, padded_kc, level_loc_ls, len_ls

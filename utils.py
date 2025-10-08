@@ -13,7 +13,7 @@ def set_random_seed(seed):
     torch.backends.cudnn.benchmark = False
     
 
-def aggregate_metrics(log):
+def aggregate_metrics(log, configs):
     results = {}
     for k in log[0].keys():
         if k == 'auc':
@@ -21,8 +21,12 @@ def aggregate_metrics(log):
             scores = np.concatenate([x[k]['scores'].numpy().reshape(-1) for x in log])
             results[k] = roc_auc_score(scores, logits)
 
-            prob = 1 / (1 + np.exp(-logits))
-            pred = (prob > 0.5) * 1
+            if configs.binary_loss_fn == 'BCE':
+                prob = 1 / (1 + np.exp(-logits))
+                pred = (prob > 0.5) * 1
+            else:
+                pred = (logits > 0.5) * 1
+            
             results['f1'] = f1_score(scores, pred)
             # print('F1 score:', f1)
 

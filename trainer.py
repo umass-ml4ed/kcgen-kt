@@ -120,7 +120,7 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
         if multitask:
             if configs.binary_loss_fn == 'BCE':
                 gt_total = torch.cat((gt_total, score_sub), 0)
-                pred = (torch.sigmoid(logits) > 0.45) * 1
+                pred = (torch.sigmoid(logits) > 0.5) * 1
                 pred_total = torch.cat((pred_total, pred), 0)
                 logits_total = torch.cat((logits_total, logits), 0)
 
@@ -205,14 +205,6 @@ def generator_step(idx, batch, model, lstm, tokenizer, optimizers=None, optimize
                 for optimizer in optimizers_multitask:
                     optimizer.zero_grad()
 
-
-    # # random baseline:
-    # logits_total = torch.randn(pred_total.shape).to(device)
-    # pred_total = (torch.sigmoid(logits_total) > 0.5) * 1
-
-    # # # majority baseline:
-    # logits_total = torch.ones(pred_total.shape).to(device)
-    # pred_total = torch.ones(pred_total.shape).to(device)
 
     log = {'loss': total_loss.cpu().detach(), 'weighted_loss': back_loss.cpu().detach(), 'kc_loss': kc_cum_loss.cpu().detach(), 'generator_loss': cum_loss.cpu().detach()}
     

@@ -16,7 +16,6 @@ from collections import Counter, defaultdict
 import matplotlib.pyplot as plt
 import statistics
 
-from model import create_tokenizer
 from utils import set_random_seed
 from trainer import *
 from data_loader import *
@@ -26,12 +25,13 @@ from utils import aggregate_metrics
 import warnings
 
 
-def evaluate(configs, now, test_loader, tokenizer, device):
+def evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict):
     results = {}
     lstm = None
     predictor = None
 
-    model, lstm, predictor, tokenizer, trans_linear = load_model_eval(configs, now, device)
+
+    model, lstm, predictor, tokenizer, trans_linear = load_model_eval(configs, now, device, len(kc_no_dict))
 
     tokenizer.padding_side = 'left'
 
@@ -69,7 +69,8 @@ def evaluate(configs, now, test_loader, tokenizer, device):
         pred_scores = [pred_score_i for pred_subset in pred_score_total for pred_score_i in pred_subset]
         pred_labels = [1 if value > 0.5 else 0 for value in pred_scores]
         gt_scores = [gt_score_i for gt_subset in gt_score_total for gt_score_i in gt_subset]
-    
+        
+
         pred_res = sum([pred == label for pred, label in zip(pred_labels, gt_scores)])
         acc = pred_res / len(gt_scores)
         results['Acc'] = acc
@@ -101,7 +102,7 @@ def evaluate(configs, now, test_loader, tokenizer, device):
     results['ground_truth_codes'] = gt_codes
     results['prompts'] = prompts
     results['students'] = students
-
+   
     
     if configs.save_model:
         with open(os.path.join(configs.model_save_dir, now, 'eval_logs.pkl'), 'wb') as f:
@@ -150,7 +151,8 @@ def generate_code_student(batch, tokenizer, model, lstm, configs, device, predic
             outputs = model.generate(inputs_embeds=input_wte_i, max_new_tokens=configs.max_new_tokens, do_sample=False, generation_config=config, bos_token_id=tokenizer.bos_token_id, pad_token_id=tokenizer.eos_token_id, eos_token_id=terminators, attention_mask=attention_i)
             
             generated_code = tokenizer.decode(outputs[0], skip_special_tokens=True)
-         
+            # generated_code = ''
+
             gen_code_ls.append(generated_code.strip())
             gt_code_ls.append(ground_truth_code.strip())
             prompt_ls.append(prompt)
@@ -245,50 +247,47 @@ class Distinct_N(Metric):
 @hydra.main(version_base=None, config_path=".", config_name="configs_kc")
 def main(configs):
     warnings.filterwarnings("ignore")
+
     # Make reproducible
     set_random_seed(configs.seed)
 
     # now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    now = '20250207_042558'
+
     
     # Set device
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')    
     if configs.use_cuda: assert device.type == 'cuda', 'No GPU found'
 
-    if configs.okt_model == 'meta-llama/Meta-Llama-3-8B-Instruct':
-        login(token='')
-
-    if configs.log_wandb:
-        wandb.login(key=configs.wandb_key, verify=True)
-        wandb.init(project=configs.wandb_project, id="", resume="must")
+    # if configs.log_wandb:
+    #     wandb.login(key=configs.wandb_key, verify=True)
+    #     wandb.init(project=configs.wandb_project, id="tkqrhhbv", resume="must")
 
     tokenizer = create_tokenizer(configs)
 
     if configs.baseline:
         kc_problem_dict, kc_no_dict = extract_baseline_kc('data/prompt_concept.csv')
     else:
-        kc_problem_dict, kc_no_dict = get_problem_kc(kc_file='problem_kc_val.json')
-
+        kc_problem_dict, kc_no_dict = get_problem_kc(configs.kc_path)   # Fine-grained kcs (more than 20)
+    
 
     _, _, test_stu, df, _ = read_data('data/dataset_time.pkl', kc_problem_dict, configs)
+
     collate_fn = CollateForKC(tokenizer, configs, device, kc_no_dict, eval=True)
-
-
     test_loader = make_dataloader(test_stu, df, collate_fn, configs)
 
     print('start eval func:')
 
-    res = evaluate(configs, now_qua, test_loader, tokenizer, device)
+    res = evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict)
 
-    result = {'codeBLEU': res['codebleu']}
-    result['Acc'] = res['Acc']
-    result['AUC'] = res['AUC']
-    result['F1'] = res['F1']
+    # result = {'codeBLEU': res['codebleu']}
+    # result['Acc'] = res['Acc']
+    # result['AUC'] = res['AUC']
+    # result['F1'] = res['F1']
 
-    print(result)
-    if configs.log_wandb:
-        wandb.log(result)
-        wandb.finish()
+    # print(result)
+    # if configs.log_wandb:
+    #     wandb.log(result)
+    #     wandb.finish()
 
 
 

@@ -25,7 +25,7 @@ from utils import aggregate_metrics
 import warnings
 
 
-def evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict):
+def evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict, lang):
     results = {}
     lstm = None
     predictor = None
@@ -82,7 +82,7 @@ def evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict):
         results['AUC'] = auc
 
     
-    codebleu_score, detailed_codebleu_score = compute_code_bleu(gt_codes, generated_codes)
+    codebleu_score, detailed_codebleu_score = compute_code_bleu(gt_codes, generated_codes, lang)
     results['codebleu'] = codebleu_score
     results['detailed_codebleu'] = detailed_codebleu_score
     
@@ -191,9 +191,8 @@ def predict_score_question_only(generator_input_wte, attention_mask, model, pred
 
 
 
-def compute_code_bleu(ground_truth_codes, generated_codes):
+def compute_code_bleu(ground_truth_codes, generated_codes, lang='java'):
     params='0.25,0.25,0.25,0.25'
-    lang='java'
     codebleu_score, detailed_codebleu_score = calc_code_bleu.get_codebleu(pre_references=[ground_truth_codes], hypothesis=generated_codes, lang=lang, params=params)
     
     return codebleu_score, detailed_codebleu_score
@@ -276,8 +275,9 @@ def main(configs):
     test_loader = make_dataloader(test_stu, df, collate_fn, configs)
 
     print('start eval func:')
+    lang = 'java' # when running on CodeWorkout, else set lang to 'python' 
 
-    res = evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict)
+    res = evaluate(configs, now, test_loader, tokenizer, device, kc_no_dict, lang)
 
     # result = {'codeBLEU': res['codebleu']}
     # result['Acc'] = res['Acc']

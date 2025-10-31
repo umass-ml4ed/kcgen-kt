@@ -1,8 +1,6 @@
-git clone https://github.com/tree-sitter/tree-sitter-go
-git clone https://github.com/tree-sitter/tree-sitter-javascript
 git clone https://github.com/tree-sitter/tree-sitter-python
-git clone https://github.com/tree-sitter/tree-sitter-ruby
-git clone https://github.com/tree-sitter/tree-sitter-php
+(cd tree-sitter-python && git checkout v0.23.6)
+
 git clone https://github.com/tree-sitter/tree-sitter-java
 git clone https://github.com/tree-sitter/tree-sitter-c-sharp
 python build.py

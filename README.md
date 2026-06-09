@@ -20,4 +20,6 @@ pip3 install torch --index-url https://download.pytorch.org/whl/cu118
 conda env update --name <env_name> --file environment.yml
 ```
 
+### Saved Checkpoint
+A saved checkpoint on the Java dataset can be downloaded at: <a href="https://drive.google.com/file/d/1BWsgioaXDGWP9s3FrDo73-p7dfIStYpx/view?usp=sharing">Checkpoint link</a>.
 
